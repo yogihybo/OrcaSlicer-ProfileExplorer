@@ -6,7 +6,7 @@ from tkinter import ttk, messagebox
 class OrcaProfileManager:
     def __init__(self, root):
         self.root = root
-        self.root.title("OrcaSlicer Inheritance Tree Manager")
+        self.root.title("OrcaSlicer Profile Manager")
         self.root.geometry("1100x700")
 
         self.appdata = os.getenv('APPDATA')
@@ -51,6 +51,10 @@ class OrcaProfileManager:
         self.tree = ttk.Treeview(tree_frame, yscrollcommand=tree_scroll.set)
         self.tree.pack(fill=tk.BOTH, expand=True)
         tree_scroll.config(command=self.tree.yview)
+        
+        # --- Configure the Bold Tag for Machine Names ---
+        self.tree.tag_configure("machine_bold", font=("Arial", 10, "bold"))
+        
         self.tree.bind("<<TreeviewSelect>>", self.on_profile_select)
 
         # === Right Panel ===
@@ -159,11 +163,13 @@ class OrcaProfileManager:
                         profile_name = data.get('name', file.replace('.json', ''))
                         inherits = data.get('inherits', None)
                         
-                        # --- NEW: Extract Printer Model for Machine matching ---
                         printer_model = data.get('printer_model', None)
                         if isinstance(printer_model, list):
                             printer_model = printer_model[0] if printer_model else None
-                        # -----------------------------------------------------
+
+                        compatible_printers = data.get('compatible_printers', [])
+                        if not isinstance(compatible_printers, list):
+                            compatible_printers = [compatible_printers]
 
                         self.profile_db[category][profile_name] = {
                             'path': filepath,
@@ -171,117 +177,152 @@ class OrcaProfileManager:
                             'children': [],
                             'is_user': is_user,
                             'display_name': profile_name,
-                            'printer_model': printer_model
+                            'printer_model': printer_model,
+                            'compatible_printers': compatible_printers
                         }
                     except Exception:
                         pass 
 
-    # --- NEW: The Matchmaker Helper Function ---
-    def get_machine_family(self, category, profile_name):
-        """Traces the inheritance chain to figure out which Printer Model a profile belongs to."""
+     # --- UPDATED: Smarter Matchmaker applied to BOTH filaments and processes ---
+    def get_machine_families(self, category, profile_name):
+        families = set()
+        
         if category == 'machine':
             current = profile_name
             while current:
                 if current in self.profile_db[category]:
                     model = self.profile_db[category][current].get('printer_model')
-                    if model: return model
+                    if model: return [model]
                     current = self.profile_db[category][current]['inherits']
                 else:
                     break
             
-            # Fallback: Absolute Root Machine Name
+            # Fallback for machines
             current = profile_name
             while current:
                 parent = self.profile_db[category].get(current, {}).get('inherits')
                 if not parent or parent not in self.profile_db[category]:
-                    return current
+                    return [current]
                 current = parent
-            return profile_name
+            return [profile_name]
 
-        else: 
-            # For filaments & processes, trace up to find the @ symbol from the system profile
+        # THE FIX: Apply the exact same compatible_printers check to processes!
+        elif category in ['filament', 'process']:
             current = profile_name
+            printers = []
+            
+            #
+            
+            # 1. Trace up inheritance to find the compatible_printers array
             while current:
-                if '@' in current:
-                    return current.split('@')[-1].strip()
                 if current in self.profile_db[category]:
+                    printers = self.profile_db[category][current].get('compatible_printers', [])
+                    if printers:
+                        break
                     current = self.profile_db[category][current]['inherits']
                 else:
                     break
-            return "Global / Unassigned"
-    # -------------------------------------------
+                    
+            # 2. If we found compatible printers, cross-reference them with the machine DB
+            if printers:
+                for p in printers:
+                    # If the listed printer is an exact machine profile, grab its master 'printer_model'
+                    if p in self.profile_db['machine']:
+                        model = self.profile_db['machine'][p].get('printer_model')
+                        families.add(model if model else p)
+                    else:
+                        families.add(p)
+                return list(families)
+
+        # Fallback for Process profiles or Filaments with empty compatible_printers arrays
+        current = profile_name
+        while current:
+            if '@' in current:
+                return [current.split('@')[-1].strip()]
+            if current in self.profile_db[category]:
+                current = self.profile_db[category][current]['inherits']
+            else:
+                break
+        return ["Global / Unassigned"]
+    # -----------------------------------------------------------------------------
 
     def render_inheritance_tree(self):
-        """Draws the Tree grouped purely by Machine Type."""
         user_main_node = self.tree.insert("", "end", text="User Profiles", open=True)
         system_main_node = self.tree.insert("", "end", text="System Profiles", open=False)
 
-        # === 1. Gather & Group User Profiles ===
-        user_roots = {cat: [] for cat in self.categories}
-        for cat in self.categories:
-            for name, data in self.profile_db[cat].items():
-                if data['is_user']:
-                    parent = data['inherits']
-                    # It's a User Root if it has no parent, or its parent is a System profile
-                    if not parent or parent not in self.profile_db[cat] or not self.profile_db[cat][parent]['is_user']:
-                        user_roots[cat].append(name)
-
-        user_tree_data = {}
-        for cat in self.categories:
-            for root_name in user_roots[cat]:
-                family = self.get_machine_family(cat, root_name)
-                if family not in user_tree_data:
-                    user_tree_data[family] = {'machine': [], 'filament': [], 'process': []}
-                user_tree_data[family][cat].append(root_name)
-
-        # Draw User Profiles 
-        for family in sorted(user_tree_data.keys()):
-            family_node = self.tree.insert(user_main_node, "end", text=f"🤖 {family}", open=True)
+        def get_roots(is_user):
+            roots = {cat: [] for cat in self.categories}
             for cat in self.categories:
-                if user_tree_data[family][cat]:
-                    cat_node = self.tree.insert(family_node, "end", text=cat.capitalize(), open=True)
-                    for root_name in sorted(user_tree_data[family][cat]):
-                        self._draw_user_node(cat_node, root_name, cat)
+                for name, data in self.profile_db[cat].items():
+                    if data['is_user'] == is_user:
+                        parent = data['inherits']
+                        if not parent or parent not in self.profile_db[cat] or self.profile_db[cat][parent]['is_user'] != is_user:
+                            roots[cat].append(name)
+            return roots
 
-        # === 2. Gather & Group System Profiles ===
-        system_roots = {cat: [] for cat in self.categories}
-        for cat in self.categories:
-            for name, data in self.profile_db[cat].items():
-                if not data['is_user']:
-                    parent = data['inherits']
-                    if not parent or parent not in self.profile_db[cat]:
-                        system_roots[cat].append(name)
-
-        system_tree_data = {}
-        for cat in self.categories:
-            for root_name in system_roots[cat]:
-                family = self.get_machine_family(cat, root_name)
-                if family not in system_tree_data:
-                    system_tree_data[family] = {'machine': [], 'filament': [], 'process': []}
-                system_tree_data[family][cat].append(root_name)
-
-        # Draw System Profiles
-        for family in sorted(system_tree_data.keys()):
-            family_node = self.tree.insert(system_main_node, "end", text=f"🤖 {family}", open=False)
+        def group_by_family(roots_dict):
+            family_map = {}
             for cat in self.categories:
-                if system_tree_data[family][cat]:
-                    cat_node = self.tree.insert(family_node, "end", text=cat.capitalize(), open=False)
-                    for root_name in sorted(system_tree_data[family][cat]):
-                        self._draw_system_node(cat_node, root_name, cat)
+                for name in roots_dict[cat]:
+                    families = self.get_machine_families(cat, name)
+                    for family in families:
+                        if family not in family_map:
+                            family_map[family] = {'machine': [], 'filament': [], 'process': []}
+                        if name not in family_map[family][cat]:
+                            family_map[family][cat].append(name)
+            return family_map
 
-    def _draw_system_node(self, parent_node, profile_name, category):
-        data = self.profile_db[category][profile_name]
-        sys_children = [c for c in data['children'] if not self.profile_db[category][c]['is_user']]
-        node_id = self.tree.insert(parent_node, "end", text=data['display_name'], values=[data['path']], open=False)
-        for child_name in sorted(sys_children):
-            self._draw_system_node(node_id, child_name, category)
+        user_family_map = group_by_family(get_roots(is_user=True))
+        system_family_map = group_by_family(get_roots(is_user=False))
 
-    def _draw_user_node(self, parent_node, profile_name, category):
+        def draw_tree(main_node, family_map, is_user):
+            for family in sorted(family_map.keys()):
+                machines = family_map[family]['machine']
+                filaments = family_map[family]['filament']
+                processes = family_map[family]['process']
+
+                if machines:
+                    for machine_name in sorted(machines):
+                        # --- ADDED: tags=("machine_bold",) ---
+                        machine_node = self._draw_node(main_node, machine_name, 'machine', is_user, prefix="🖨️ ", tags=("machine_bold",))
+                        
+                        if filaments:
+                            fil_group = self.tree.insert(machine_node, "end", text="🧶 Filaments", open=is_user)
+                            for fil_name in sorted(filaments):
+                                self._draw_node(fil_group, fil_name, 'filament', is_user, prefix="")
+                        if processes:
+                            proc_group = self.tree.insert(machine_node, "end", text="⚙️ Processes", open=is_user)
+                            for proc_name in sorted(processes):
+                                self._draw_node(proc_group, proc_name, 'process', is_user, prefix="")
+                else:
+                    # --- ADDED: tags=("machine_bold",) ---
+                    family_node = self.tree.insert(main_node, "end", text=f"🤖 [System Base: {family}]", open=is_user, tags=("machine_bold",))
+                    if filaments:
+                        fil_group = self.tree.insert(family_node, "end", text="🧶 Filaments", open=is_user)
+                        for fil_name in sorted(filaments):
+                            self._draw_node(fil_group, fil_name, 'filament', is_user, prefix="")
+                    if processes:
+                        proc_group = self.tree.insert(family_node, "end", text="⚙️ Processes", open=is_user)
+                        for proc_name in sorted(processes):
+                            self._draw_node(proc_group, proc_name, 'process', is_user, prefix="")
+
+        draw_tree(user_main_node, user_family_map, is_user=True)
+        draw_tree(system_main_node, system_family_map, is_user=False)
+
+    # --- ADDED: tags=() parameter ---
+    def _draw_node(self, parent_node, profile_name, category, is_user, prefix="", tags=()):
         data = self.profile_db[category][profile_name]
-        user_children = [c for c in data['children'] if self.profile_db[category][c]['is_user']]
-        node_id = self.tree.insert(parent_node, "end", text=data['display_name'], values=[data['path']], open=True)
-        for child_name in sorted(user_children):
-            self._draw_user_node(node_id, child_name, category)
+        children = [c for c in data['children'] if self.profile_db[category][c]['is_user'] == is_user]
+        
+        display_text = f"{prefix}{data['display_name']}"
+        # Apply the tag to the node
+        node_id = self.tree.insert(parent_node, "end", text=display_text, values=[data['path']], open=is_user, tags=tags)
+        
+        for child_name in sorted(children):
+            # Pass empty tags to children so they stay normal weight
+            self._draw_node(node_id, child_name, category, is_user, prefix="", tags=())
+            
+        return node_id
 
     def on_profile_select(self, event):
         selection = self.tree.selection()
