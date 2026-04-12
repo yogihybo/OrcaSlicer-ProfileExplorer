@@ -217,7 +217,8 @@ class OrcaProfileManager:
             if not new_name:
                 return 
 
-            safe_filename = "".join([c for c in new_name if c.isalpha() or c.isdigit() or c in (' ', '-', '_')]).rstrip()
+            # Preserves dots and @ symbols in the generated filename
+            safe_filename = "".join([c for c in new_name if c.isalpha() or c.isdigit() or c in (' ', '-', '_', '.', '@')]).rstrip()
             if not safe_filename:
                 safe_filename = "Duplicated_Profile"
 
@@ -227,7 +228,6 @@ class OrcaProfileManager:
                 messagebox.showerror("Error", f"A profile named '{safe_filename}' already exists!")
                 return
 
-            # --- UPDATED: Update the name AND the setting_id tags ---
             current_data['name'] = new_name
             
             if 'setting_id' in current_data:
@@ -235,7 +235,6 @@ class OrcaProfileManager:
                 
             if 'settings_id' in current_data:
                 current_data['settings_id'] = new_name
-            # --------------------------------------------------------
 
             os.makedirs(os.path.dirname(new_filepath), exist_ok=True)
 
