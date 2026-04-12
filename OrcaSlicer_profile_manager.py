@@ -1,7 +1,7 @@
 import os
 import json
 import tkinter as tk
-from tkinter import ttk, messagebox
+from tkinter import ttk, messagebox, simpledialog
 
 class OrcaProfileManager:
     def __init__(self, root):
@@ -39,7 +39,7 @@ class OrcaProfileManager:
         footer_frame = tk.Frame(left_frame)
         footer_frame.pack(side=tk.BOTTOM, fill=tk.X, pady=(5, 0))
         
-        self.delete_btn = tk.Button(footer_frame, text="🗑️ Delete Selected Profile", command=self.delete_profile, fg="red", font=("Arial", 9, "bold"), state=tk.DISABLED)
+        self.delete_btn = tk.Button(footer_frame, text="🗑️ Delete Selected", command=self.delete_profile, fg="red", font=("Arial", 9, "bold"), state=tk.DISABLED)
         self.delete_btn.pack(side=tk.RIGHT)
 
         tree_frame = tk.Frame(left_frame)
@@ -52,9 +52,7 @@ class OrcaProfileManager:
         self.tree.pack(fill=tk.BOTH, expand=True)
         tree_scroll.config(command=self.tree.yview)
         
-        # --- Configure the Bold Tag for Machine Names ---
         self.tree.tag_configure("machine_bold", font=("Arial", 10, "bold"))
-        
         self.tree.bind("<<TreeviewSelect>>", self.on_profile_select)
 
         # === Right Panel ===
@@ -70,8 +68,19 @@ class OrcaProfileManager:
         self.text_editor.bind("<Return>", self.auto_indent)
         self.text_editor.bind("<KeyRelease>", self.check_modifications)
 
-        self.save_btn = tk.Button(right_frame, text="Save Changes to JSON", command=self.save_profile, bg="lightgray", font=("Arial", 9, "bold"), state=tk.DISABLED)
-        self.save_btn.pack(pady=5)
+        # --- Button Frame ---
+        btn_frame = tk.Frame(right_frame)
+        btn_frame.pack(pady=5)
+
+        self.save_btn = tk.Button(btn_frame, text="Save Changes to JSON", command=self.save_profile, bg="lightgray", font=("Arial", 9, "bold"), state=tk.DISABLED)
+        self.save_btn.pack(side=tk.LEFT, padx=5)
+        
+        self.flatten_btn = tk.Button(btn_frame, text="⏬ Flatten", command=self.flatten_profile, fg="white", bg="orange", font=("Arial", 9, "bold"), state=tk.DISABLED)
+        self.flatten_btn.pack(side=tk.LEFT, padx=5)
+
+        self.duplicate_btn = tk.Button(btn_frame, text="📑 Duplicate", command=self.duplicate_profile, bg="lightblue", font=("Arial", 9, "bold"), state=tk.DISABLED)
+        self.duplicate_btn.pack(side=tk.LEFT, padx=5)
+        
         self.current_file_path = ""
 
     def check_modifications(self, event=None):
@@ -114,6 +123,133 @@ class OrcaProfileManager:
             except Exception as e:
                 messagebox.showerror("Error", f"Failed to delete the profile.\n\n{e}")
 
+    def flatten_profile(self):
+        if not self.current_file_path or self.flatten_btn['state'] == tk.DISABLED:
+            return
+
+        try:
+            current_data = json.loads(self.text_editor.get("1.0", tk.END))
+
+            if "inherits" not in current_data or not current_data["inherits"]:
+                messagebox.showinfo("Info", "This profile does not inherit anything. It is already fully flattened!")
+                return
+
+            confirm = messagebox.askyesno(
+                "Confirm Flatten",
+                "Flattening will merge all parent settings into this file and permanently break the inheritance link.\n\nThis means if the base profile receives bug fixes in a future OrcaSlicer update, this profile will NOT receive them.\n\nDo you want to continue?",
+                icon='warning'
+            )
+            
+            if not confirm:
+                return
+
+            category = None
+            for cat in self.categories:
+                if f"\\{cat}\\" in self.current_file_path or f"/{cat}/" in self.current_file_path or self.current_file_path.endswith(f"{cat}"):
+                    category = cat
+                    break
+
+            if not category:
+                return
+
+            chain = []
+            current_inherits = current_data["inherits"]
+
+            while current_inherits:
+                if current_inherits in self.profile_db[category]:
+                    parent_path = self.profile_db[category][current_inherits]['path']
+                    try:
+                        with open(parent_path, 'r', encoding='utf-8') as f:
+                            parent_data = json.load(f)
+                            chain.append(parent_data)
+                            current_inherits = parent_data.get("inherits")
+                    except Exception:
+                        messagebox.showerror("Error", f"Failed to read parent profile:\n{current_inherits}")
+                        return
+                else:
+                    messagebox.showwarning("Incomplete Chain", f"Could not find parent profile '{current_inherits}'. The flattened profile may be missing base settings.")
+                    break
+
+            flattened_data = {}
+            for parent_data in reversed(chain):
+                flattened_data.update(parent_data)
+
+            flattened_data.update(current_data)
+
+            if "inherits" in flattened_data:
+                del flattened_data["inherits"]
+
+            formatted_json = json.dumps(flattened_data, indent=4)
+            self.text_editor.delete(1.0, tk.END)
+            self.text_editor.insert(tk.END, formatted_json)
+
+            self.check_modifications()
+            messagebox.showinfo("Success", "Profile flattened in the editor!\n\nReview the settings, then click 'Save Changes to JSON' to finalize it.")
+
+        except json.JSONDecodeError:
+            messagebox.showerror("Error", "Invalid JSON formatting in the editor. Please fix any syntax errors before flattening.")
+
+    def duplicate_profile(self):
+        if not self.current_file_path or self.duplicate_btn['state'] == tk.DISABLED:
+            return
+
+        try:
+            current_data = json.loads(self.text_editor.get("1.0", tk.END))
+            
+            category = None
+            for cat in self.categories:
+                if f"\\{cat}\\" in self.current_file_path or f"/{cat}/" in self.current_file_path or self.current_file_path.endswith(f"{cat}"):
+                    category = cat
+                    break
+
+            if not category:
+                messagebox.showerror("Error", "Could not determine the profile category.")
+                return
+
+            current_name = current_data.get('name', 'New_Profile')
+            
+            new_name = simpledialog.askstring(
+                "Duplicate Profile", 
+                "Enter a new name for this profile:", 
+                initialvalue=f"{current_name} (Copy)"
+            )
+            
+            if not new_name:
+                return 
+
+            safe_filename = "".join([c for c in new_name if c.isalpha() or c.isdigit() or c in (' ', '-', '_')]).rstrip()
+            if not safe_filename:
+                safe_filename = "Duplicated_Profile"
+
+            new_filepath = os.path.join(self.user_dir, category, f"{safe_filename}.json")
+
+            if os.path.exists(new_filepath):
+                messagebox.showerror("Error", f"A profile named '{safe_filename}' already exists!")
+                return
+
+            # --- UPDATED: Update the name AND the setting_id tags ---
+            current_data['name'] = new_name
+            
+            if 'setting_id' in current_data:
+                current_data['setting_id'] = new_name
+                
+            if 'settings_id' in current_data:
+                current_data['settings_id'] = new_name
+            # --------------------------------------------------------
+
+            os.makedirs(os.path.dirname(new_filepath), exist_ok=True)
+
+            with open(new_filepath, 'w', encoding='utf-8') as f:
+                json.dump(current_data, f, indent=4)
+
+            messagebox.showinfo("Success", f"Profile duplicated successfully as '{new_name}'!")
+            self.reload_profiles()
+
+        except json.JSONDecodeError:
+            messagebox.showerror("Error", "Invalid JSON formatting in the editor. Please fix any syntax errors before duplicating.")
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to duplicate profile:\n{e}")
+
     def reload_profiles(self):
         for item in self.tree.get_children():
             self.tree.delete(item)
@@ -125,6 +261,8 @@ class OrcaProfileManager:
         
         self.save_btn.config(state=tk.DISABLED, bg="lightgray", cursor="arrow")
         self.delete_btn.config(state=tk.DISABLED, cursor="arrow")
+        self.flatten_btn.config(state=tk.DISABLED, cursor="arrow")
+        self.duplicate_btn.config(state=tk.DISABLED, cursor="arrow") 
         
         self.profile_db = {cat: {} for cat in self.categories}
         self.build_database()
@@ -183,7 +321,6 @@ class OrcaProfileManager:
                     except Exception:
                         pass 
 
-     # --- UPDATED: Smarter Matchmaker applied to BOTH filaments and processes ---
     def get_machine_families(self, category, profile_name):
         families = set()
         
@@ -197,7 +334,6 @@ class OrcaProfileManager:
                 else:
                     break
             
-            # Fallback for machines
             current = profile_name
             while current:
                 parent = self.profile_db[category].get(current, {}).get('inherits')
@@ -206,14 +342,10 @@ class OrcaProfileManager:
                 current = parent
             return [profile_name]
 
-        # THE FIX: Apply the exact same compatible_printers check to processes!
         elif category in ['filament', 'process']:
             current = profile_name
             printers = []
             
-            #
-            
-            # 1. Trace up inheritance to find the compatible_printers array
             while current:
                 if current in self.profile_db[category]:
                     printers = self.profile_db[category][current].get('compatible_printers', [])
@@ -223,10 +355,8 @@ class OrcaProfileManager:
                 else:
                     break
                     
-            # 2. If we found compatible printers, cross-reference them with the machine DB
             if printers:
                 for p in printers:
-                    # If the listed printer is an exact machine profile, grab its master 'printer_model'
                     if p in self.profile_db['machine']:
                         model = self.profile_db['machine'][p].get('printer_model')
                         families.add(model if model else p)
@@ -234,17 +364,15 @@ class OrcaProfileManager:
                         families.add(p)
                 return list(families)
 
-        # Fallback for Process profiles or Filaments with empty compatible_printers arrays
-        current = profile_name
-        while current:
-            if '@' in current:
-                return [current.split('@')[-1].strip()]
-            if current in self.profile_db[category]:
-                current = self.profile_db[category][current]['inherits']
-            else:
-                break
-        return ["Global / Unassigned"]
-    # -----------------------------------------------------------------------------
+            current = profile_name
+            while current:
+                if '@' in current:
+                    return [current.split('@')[-1].strip()]
+                if current in self.profile_db[category]:
+                    current = self.profile_db[category][current]['inherits']
+                else:
+                    break
+            return ["Global / Unassigned"]
 
     def render_inheritance_tree(self):
         user_main_node = self.tree.insert("", "end", text="User Profiles", open=True)
@@ -270,6 +398,30 @@ class OrcaProfileManager:
                             family_map[family] = {'machine': [], 'filament': [], 'process': []}
                         if name not in family_map[family][cat]:
                             family_map[family][cat].append(name)
+                            
+            canon_families = [f for f, data in family_map.items() if data['machine']]
+            orphan_families = [f for f, data in family_map.items() if not data['machine'] and f != "Global / Unassigned"]
+
+            for orphan in orphan_families:
+                best_match = None
+                o_clean = orphan.lower().replace(" ", "").replace("_", "").replace("-", "")
+
+                for canon in canon_families:
+                    c_clean = canon.lower().replace(" ", "").replace("_", "").replace("-", "")
+                    if "bbl" in o_clean and "bambulab" in c_clean:
+                        best_match = canon
+                        break
+                    if o_clean in c_clean or c_clean in o_clean:
+                        best_match = canon
+                        break
+
+                if best_match:
+                    for cat in self.categories:
+                        for item in family_map[orphan][cat]:
+                            if item not in family_map[best_match][cat]:
+                                family_map[best_match][cat].append(item)
+                    del family_map[orphan]
+            
             return family_map
 
         user_family_map = group_by_family(get_roots(is_user=True))
@@ -283,7 +435,6 @@ class OrcaProfileManager:
 
                 if machines:
                     for machine_name in sorted(machines):
-                        # --- ADDED: tags=("machine_bold",) ---
                         machine_node = self._draw_node(main_node, machine_name, 'machine', is_user, prefix="🖨️ ", tags=("machine_bold",))
                         
                         if filaments:
@@ -295,7 +446,6 @@ class OrcaProfileManager:
                             for proc_name in sorted(processes):
                                 self._draw_node(proc_group, proc_name, 'process', is_user, prefix="")
                 else:
-                    # --- ADDED: tags=("machine_bold",) ---
                     family_node = self.tree.insert(main_node, "end", text=f"🤖 [System Base: {family}]", open=is_user, tags=("machine_bold",))
                     if filaments:
                         fil_group = self.tree.insert(family_node, "end", text="🧶 Filaments", open=is_user)
@@ -309,17 +459,14 @@ class OrcaProfileManager:
         draw_tree(user_main_node, user_family_map, is_user=True)
         draw_tree(system_main_node, system_family_map, is_user=False)
 
-    # --- ADDED: tags=() parameter ---
     def _draw_node(self, parent_node, profile_name, category, is_user, prefix="", tags=()):
         data = self.profile_db[category][profile_name]
         children = [c for c in data['children'] if self.profile_db[category][c]['is_user'] == is_user]
         
         display_text = f"{prefix}{data['display_name']}"
-        # Apply the tag to the node
         node_id = self.tree.insert(parent_node, "end", text=display_text, values=[data['path']], open=is_user, tags=tags)
         
         for child_name in sorted(children):
-            # Pass empty tags to children so they stay normal weight
             self._draw_node(node_id, child_name, category, is_user, prefix="", tags=())
             
         return node_id
@@ -335,10 +482,14 @@ class OrcaProfileManager:
             self.current_file_path = item_data['values'][0]
             self.file_label.config(text=self.current_file_path, fg="black")
             
+            self.duplicate_btn.config(state=tk.NORMAL, cursor="hand2")
+
             if self.current_file_path.startswith(self.user_dir):
                 self.delete_btn.config(state=tk.NORMAL, cursor="hand2")
+                self.flatten_btn.config(state=tk.NORMAL, cursor="hand2")
             else:
                 self.delete_btn.config(state=tk.DISABLED, cursor="arrow")
+                self.flatten_btn.config(state=tk.DISABLED, cursor="arrow")
             
             with open(self.current_file_path, 'r', encoding='utf-8') as file:
                 try:
@@ -355,6 +506,8 @@ class OrcaProfileManager:
                     messagebox.showerror("Error", f"Invalid JSON format in:\n{self.current_file_path}")
         else:
             self.delete_btn.config(state=tk.DISABLED, cursor="arrow")
+            self.flatten_btn.config(state=tk.DISABLED, cursor="arrow")
+            self.duplicate_btn.config(state=tk.DISABLED, cursor="arrow")
             self.save_btn.config(state=tk.DISABLED, bg="lightgray", cursor="arrow")
             self.current_file_path = ""
             self.original_text = ""
