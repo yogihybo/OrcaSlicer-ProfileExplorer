@@ -343,4 +343,215 @@ class OrcaProfileManager:
                 else:
                     break
             
-            current
+            current = profile_name
+            while current:
+                parent = self.profile_db[category].get(current, {}).get('inherits')
+                if not parent or parent not in self.profile_db[category]:
+                    return [current]
+                current = parent
+            return [profile_name]
+
+        elif category in ['filament', 'process']:
+            current = profile_name
+            printers = []
+            
+            while current:
+                if current in self.profile_db[category]:
+                    printers = self.profile_db[category][current].get('compatible_printers', [])
+                    if printers:
+                        break
+                    current = self.profile_db[category][current]['inherits']
+                else:
+                    break
+                    
+            if printers:
+                for p in printers:
+                    if p in self.profile_db['machine']:
+                        model = self.profile_db['machine'][p].get('printer_model')
+                        families.add(model if model else p)
+                    else:
+                        families.add(p)
+                return list(families)
+
+            current = profile_name
+            while current:
+                if '@' in current:
+                    return [current.split('@')[-1].strip()]
+                if current in self.profile_db[category]:
+                    current = self.profile_db[category][current]['inherits']
+                else:
+                    break
+            return ["Global / Unassigned"]
+
+    def render_inheritance_tree(self):
+        user_main_node = self.tree.insert("", "end", text="User Profiles", open=True)
+        system_main_node = self.tree.insert("", "end", text="System Profiles", open=False)
+
+        def get_roots(is_user):
+            roots = {cat: [] for cat in self.categories}
+            for cat in self.categories:
+                for name, data in self.profile_db[cat].items():
+                    if data['is_user'] == is_user:
+                        parent = data['inherits']
+                        if not parent or parent not in self.profile_db[cat] or self.profile_db[cat][parent]['is_user'] != is_user:
+                            roots[cat].append(name)
+            return roots
+
+        def group_by_family(roots_dict):
+            family_map = {}
+            for cat in self.categories:
+                for name in roots_dict[cat]:
+                    families = self.get_machine_families(cat, name)
+                    for family in families:
+                        if family not in family_map:
+                            family_map[family] = {'machine': [], 'filament': [], 'process': []}
+                        if name not in family_map[family][cat]:
+                            family_map[family][cat].append(name)
+                            
+            canon_families = [f for f, data in family_map.items() if data['machine']]
+            orphan_families = [f for f, data in family_map.items() if not data['machine'] and f != "Global / Unassigned"]
+
+            for orphan in orphan_families:
+                best_match = None
+                o_clean = orphan.lower().replace(" ", "").replace("_", "").replace("-", "")
+
+                for canon in canon_families:
+                    c_clean = canon.lower().replace(" ", "").replace("_", "").replace("-", "")
+                    if "bbl" in o_clean and "bambulab" in c_clean:
+                        best_match = canon
+                        break
+                    if o_clean in c_clean or c_clean in o_clean:
+                        best_match = canon
+                        break
+
+                if best_match:
+                    for cat in self.categories:
+                        for item in family_map[orphan][cat]:
+                            if item not in family_map[best_match][cat]:
+                                family_map[best_match][cat].append(item)
+                    del family_map[orphan]
+            
+            return family_map
+
+        user_family_map = group_by_family(get_roots(is_user=True))
+        system_family_map = group_by_family(get_roots(is_user=False))
+
+        def draw_tree(main_node, family_map, is_user):
+            for family in sorted(family_map.keys()):
+                machines = family_map[family]['machine']
+                filaments = family_map[family]['filament']
+                processes = family_map[family]['process']
+
+                if machines:
+                    for machine_name in sorted(machines):
+                        machine_node = self._draw_node(main_node, machine_name, 'machine', is_user, prefix="🖨️ ", tags=("machine_bold",))
+                        
+                        if filaments:
+                            fil_group = self.tree.insert(machine_node, "end", text="🧶 Filaments", open=is_user)
+                            for fil_name in sorted(filaments):
+                                self._draw_node(fil_group, fil_name, 'filament', is_user, prefix="")
+                        if processes:
+                            proc_group = self.tree.insert(machine_node, "end", text="⚙️ Processes", open=is_user)
+                            for proc_name in sorted(processes):
+                                self._draw_node(proc_group, proc_name, 'process', is_user, prefix="")
+                else:
+                    family_node = self.tree.insert(main_node, "end", text=f"🤖 [System Base: {family}]", open=is_user, tags=("machine_bold",))
+                    if filaments:
+                        fil_group = self.tree.insert(family_node, "end", text="🧶 Filaments", open=is_user)
+                        for fil_name in sorted(filaments):
+                            self._draw_node(fil_group, fil_name, 'filament', is_user, prefix="")
+                    if processes:
+                        proc_group = self.tree.insert(family_node, "end", text="⚙️ Processes", open=is_user)
+                        for proc_name in sorted(processes):
+                            self._draw_node(proc_group, proc_name, 'process', is_user, prefix="")
+
+        draw_tree(user_main_node, user_family_map, is_user=True)
+        draw_tree(system_main_node, system_family_map, is_user=False)
+
+    def _draw_node(self, parent_node, profile_name, category, is_user, prefix="", tags=()):
+        data = self.profile_db[category][profile_name]
+        children = [c for c in data['children'] if self.profile_db[category][c]['is_user'] == is_user]
+        
+        display_text = f"{prefix}{data['display_name']}"
+        node_id = self.tree.insert(parent_node, "end", text=display_text, values=[data['path']], open=is_user, tags=tags)
+        
+        for child_name in sorted(children):
+            self._draw_node(node_id, child_name, category, is_user, prefix="", tags=())
+            
+        return node_id
+
+    def on_profile_select(self, event):
+        selection = self.tree.selection()
+        if not selection:
+            return
+            
+        item_data = self.tree.item(selection[0])
+        
+        if item_data['values']:
+            self.current_file_path = item_data['values'][0]
+            self.file_label.config(text=self.current_file_path, fg="black")
+            
+            self.duplicate_btn.config(state=tk.NORMAL, cursor="hand2")
+
+            if self.current_file_path.startswith(self.user_dir):
+                self.delete_btn.config(state=tk.NORMAL, cursor="hand2")
+                self.flatten_btn.config(state=tk.NORMAL, cursor="hand2")
+            else:
+                self.delete_btn.config(state=tk.DISABLED, cursor="arrow")
+                self.flatten_btn.config(state=tk.DISABLED, cursor="arrow")
+            
+            with open(self.current_file_path, 'r', encoding='utf-8') as file:
+                try:
+                    data = json.load(file)
+                    formatted_json = json.dumps(data, indent=4)
+                    
+                    self.text_editor.delete(1.0, tk.END)
+                    self.text_editor.insert(tk.END, formatted_json)
+                    
+                    self.original_text = formatted_json
+                    self.check_modifications()
+                    
+                except json.JSONDecodeError:
+                    messagebox.showerror("Error", f"Invalid JSON format in:\n{self.current_file_path}")
+        else:
+            self.delete_btn.config(state=tk.DISABLED, cursor="arrow")
+            self.flatten_btn.config(state=tk.DISABLED, cursor="arrow")
+            self.duplicate_btn.config(state=tk.DISABLED, cursor="arrow")
+            self.save_btn.config(state=tk.DISABLED, bg="lightgray", cursor="arrow")
+            self.current_file_path = ""
+            self.original_text = ""
+
+    def save_profile(self):
+        if not self.current_file_path or self.save_btn['state'] == tk.DISABLED:
+            return
+            
+        try:
+            current_text = self.text_editor.get("1.0", tk.END)
+            new_data = json.loads(current_text)
+            
+            category = None
+            for cat in self.categories:
+                if f"\\{cat}\\" in self.current_file_path or f"/{cat}/" in self.current_file_path or self.current_file_path.endswith(f"{cat}"):
+                    category = cat
+                    break
+                    
+            if category and "inherits" in new_data:
+                parent_name = new_data["inherits"]
+                if parent_name and parent_name not in self.profile_db[category]:
+                    messagebox.showerror("Validation Error", f"Save Blocked!\n\nThe parent profile '{parent_name}' does not exist in the System Base or User database.\n\nOrcaSlicer will crash or ignore this profile if the inheritance chain is broken. Please check your spelling.")
+                    return
+            
+            with open(self.current_file_path, 'w', encoding='utf-8') as file:
+                json.dump(new_data, file, indent=4)
+            messagebox.showinfo("Success", "Profile successfully updated!")
+            
+            self.original_text = self.text_editor.get("1.0", "end-1c")
+            self.check_modifications()
+            
+        except json.JSONDecodeError:
+            messagebox.showerror("Error", "Invalid JSON. Please fix formatting before saving.")
+
+if __name__ == "__main__":
+    root = tk.Tk()
+    app = OrcaProfileManager(root)
+    root.mainloop()
